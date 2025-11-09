@@ -1,0 +1,280 @@
+import os
+import time
+import logging
+from typing import Dict, List, Optional, Any, Union
+import google.generativeai as genai
+from dotenv import load_dotenv
+import json
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
+load_dotenv()
+
+class GeminiClient:
+    """Client for interacting with the Gemini API."""
+    
+    DEFAULT_MODEL = "gemini-2.5-flash"  # Using a valid model from the available models list
+    
+    def __init__(
+        self, 
+        api_key: Optional[str] = None, 
+        model_name: str = DEFAULT_MODEL
+    ):
+        """Initialize the Gemini client.
+        
+        Args:
+            api_key: Google AI API key. If not provided, will use GEMINI_API_KEY from .env
+            model_name: Name of the Gemini model to use (default: gemini-2.5-flash)
+        """
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "Gemini API key not provided. Set GEMINI_API_KEY in .env or pass as argument."
+            )
+            
+        self.model_name = model_name
+        
+        # Configure the API key
+        genai.configure(api_key=self.api_key)
+        
+        # Initialize the model
+        self.model = genai.GenerativeModel(model_name)
+        
+        logger.info(f"Initialized Gemini client with model: {model_name}")
+    
+    def generate_content(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_output_tokens: Optional[int] = 2048,
+        **generation_config
+    ) -> str:
+        """Generate content using the Gemini model.
+        
+        Args:
+            prompt: The prompt to generate content from
+            temperature: Controls randomness (0.0 to 1.0)
+            max_output_tokens: Maximum number of tokens to generate
+            **generation_config: Additional generation parameters
+                - top_p: Nucleus sampling parameter
+                - top_k: Top-k sampling parameter
+                
+        Returns:
+            Generated text
+        """
+        try:
+            # Prepare generation config
+            config = {
+                'temperature': temperature,
+                'max_output_tokens': max_output_tokens,
+                **generation_config
+            }
+            
+            # Generate content using the model's generate_content method
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(**config)
+            )
+            
+            # Extract text from response
+            if hasattr(response, 'text'):
+                return response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                return response.candidates[0].content.parts[0].text
+            elif hasattr(response, 'result') and hasattr(response.result, 'text'):
+                return response.result.text
+            else:
+                # Fallback to string representation
+                return str(response)
+                
+        except Exception as e:
+            logger.error(f"Error generating content: {str(e)}")
+            logger.error(f"Response object: {response}" if 'response' in locals() else "No response object")
+            raise
+            
+    # Alias for backward compatibility
+    generate_text = generate_content
+    
+    def chat(
+        self, 
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        **kwargs
+    ) -> str:
+        """Generate a chat response.
+        
+        Args:
+            messages: List of message dictionaries with 'role' and 'content' keys
+            temperature: Controls randomness (0.0 to 1.0)
+            **kwargs: Additional model parameters
+            
+        Returns:
+            Generated response
+        """
+        try:
+            # Convert messages to the format expected by the API
+            chat = self.model.start_chat(history=[])
+            
+            # Add all messages to the chat history
+            for msg in messages[:-1]:
+                if msg["role"].lower() == "user":
+                    chat.send_message(msg["content"])
+                else:
+                    # For assistant messages, we need to add them as a response
+                    chat.history.append({
+                        "role": "model",
+                        "parts": [{"text": msg["content"]}]
+                    })
+            
+            # Generate response for the last user message
+            response = chat.send_message(
+                messages[-1]["content"],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=temperature,
+                    **kwargs
+                )
+            )
+            
+            if not response.text:
+                raise ValueError("No response was generated by the model")
+                
+            return response.text
+            
+        except Exception as e:
+            logger.error(f"Error in chat: {str(e)}")
+            raise
+
+    def analyze_document(
+        self,
+        document_text: str,
+        query: str,
+        chunk_size: int = 4000,
+        overlap: int = 200
+    ) -> str:
+        """Analyze a document by processing it in chunks.
+        
+        Args:
+            document_text: The full text of the document.
+            query: The question or analysis request.
+            chunk_size: Maximum tokens per chunk.
+            overlap: Number of tokens to overlap between chunks.
+            
+        Returns:
+            Analysis result as a string.
+        """
+        # Simple chunking - in a real app, use the TextProcessor
+        chunks = self._chunk_text(document_text, chunk_size, overlap)
+        
+        # Process each chunk and collect responses
+        responses = []
+        for i, chunk in enumerate(chunks, 1):
+            chunk_prompt = f"""Document chunk {i}/{len(chunks)}:
+{chunk}
+
+Question: {query}"""
+            
+            response = self.generate_text(
+                prompt=chunk_prompt,
+                temperature=0.7,
+                max_output_tokens=2048
+            )
+            responses.append(response)
+        
+        # Combine and summarize responses if needed
+        if len(responses) > 1:
+            combined = "\n\n".join(
+                f"Chunk {i+1} analysis:\n{resp}" 
+                for i, resp in enumerate(responses)
+            )
+            return self.generate_text(
+                prompt=f"""Combine these analyses into a single coherent response:
+                
+{combined}
+
+Question: {query}
+
+Provide a comprehensive answer:""",
+                temperature=0.7,
+                max_output_tokens=2048,
+                max_tokens=2048
+            )
+        return responses[0] if responses else "No analysis could be performed."
+    
+    def _chunk_text(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """Simple text chunking. In a real app, use the TextProcessor class."""
+        words = text.split()
+        chunks = []
+        start = 0
+        
+        while start < len(words):
+            end = min(start + chunk_size, len(words))
+            chunk = ' '.join(words[start:end])
+            chunks.append(chunk)
+            
+            if end == len(words):
+                break
+                
+            # Move back by overlap to create overlap between chunks
+            start = end - overlap
+        
+        return chunks
+
+# Singleton instance
+_gemini_client = None
+
+def get_gemini_client(
+    api_key: Optional[str] = None,
+    model_name: str = GeminiClient.DEFAULT_MODEL
+) -> GeminiClient:
+    """Get or create a singleton instance of the Gemini client.
+    
+    Args:
+        api_key: Optional API key. If None, will use environment variable.
+        model_name: Name of the Gemini model to use.
+        
+    Returns:
+        GeminiClient instance.
+    """
+    global _gemini_client
+    
+    if _gemini_client is None or _gemini_client.model_name != model_name:
+        _gemini_client = GeminiClient(api_key=api_key, model_name=model_name)
+    
+    return _gemini_client
+
+# Example usage
+if __name__ == "__main__":
+    try:
+        # List available models
+        print("Available models:")
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                print(f"- {m.name}")
+        
+        # Initialize client
+        print("\nInitializing Gemini client...")
+        client = get_gemini_client()
+        
+        # Test text generation
+        print("\nTesting text generation...")
+        response = client.generate_text("Tell me a short joke about AI")
+        print(f"Response: {response}")
+        
+        # Example 2: Document analysis
+        print("Testing document analysis...")
+        sample_doc = """Artificial intelligence (AI) is intelligence demonstrated by machines, as opposed to 
+        the natural intelligence displayed by animals including humans. AI research has been defined as the 
+        field of study of intelligent agents, which refers to any system that perceives its environment and 
+        takes actions that maximize its chance of achieving its goals."""
+        
+        analysis = client.analyze_document(
+            document_text=sample_doc,
+            query="What is artificial intelligence according to this document?"
+        )
+        print("Analysis:", analysis)
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")

@@ -1,0 +1,27 @@
+# Core dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+python-dotenv>=1.0.0
+
+# PDF processing
+pdfplumber>=0.9.0
+pdfminer.six>=20221105
+
+# Text processing
+sentence-transformers>=2.2.2
+torch>=2.0.0
+transformers>=4.30.0
+
+# Vector database
+chromadb>=0.4.22
+
+# Web interface
+streamlit>=1.24.0
+
+# Gemini API
+google-generativeai>=0.3.0
+
+# Utilities
+tqdm>=4.65.0
+python-multipart>=0.0.6
+typing-extensions==4.8.0
